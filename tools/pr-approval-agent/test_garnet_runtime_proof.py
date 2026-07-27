@@ -7,13 +7,15 @@ milliseconds with no network and no LLM key, so the `.github/workflows/
 proof-check.yml` schedule keeps a green badge only while the core A/B still
 holds.
 
-The four claims under test are exactly the ones an evaluator cares about:
+The claims under test are exactly the ones an evaluator cares about:
 
   1. clean, head-pinned record        -> deps deny is LIFTED (bypass granted)
   2. off-baseline egress (httpbin)     -> deps deny STANDS + destination named
   3. stale / pending record            -> WAIT (never a silent approve)
   4. the comment's legend example      -> NEVER parsed as recorded egress
   5. scoping: only dependency-shaped files can ride the bypass, never auth
+  6. transitive egress not in the diff -> caught from the record; all hosts named
+  7. the posted grounding text         -> says WITHHELD vs APPLIED correctly
 """
 
 from __future__ import annotations
@@ -111,3 +113,50 @@ def test_bypass_is_scoped_to_dependency_files_only():
     rec = _parse_comment(_comment(HEAD, ["registry.npmjs.org"]))
     assured = runtime_assured_files(rec, HEAD, files)
     assert set(assured) == set(DEP_FILES), "auth/billing never ride the bypass"
+
+
+def test_transitive_egress_not_in_diff_is_caught_and_all_hosts_named():
+    # The realistic case: the PR diff only adds a top-level dependency, but the
+    # recorded install reaches several hosts via a *transitive* postinstall.
+    # The gate must catch it from the runtime record (not the diff) and name
+    # every off-baseline destination as evidence.
+    transitive = ["api.ipify.org", "ip-api.com", "httpbin.org"]
+    rec = _parse_comment(_comment(HEAD, ["registry.npmjs.org", *transitive]))
+    assert rec.pinned_to(HEAD)
+    assert rec.off_baseline() == set(transitive), "all transitive hosts named"
+    assert runtime_assured_files(rec, HEAD, DEP_FILES) == set(), "deny stands"
+
+
+def test_render_grounding_states_withheld_vs_applied():
+    from render_grounding import render
+
+    off = {
+        "classification": {
+            "deny_categories": ["deps_toolchain"],
+            "runtime_assured_files": [],
+            "file_paths": DEP_FILES,
+            "garnet_runtime": {
+                "commit": HEAD,
+                "pinned_to_head": True,
+                "pending": False,
+                "off_baseline_destinations": ["api.ipify.org", "httpbin.org"],
+            },
+        }
+    }
+    md = render(off)
+    assert "WITHHELD" in md and "api.ipify.org" in md and "httpbin.org" in md
+
+    clean = {
+        "classification": {
+            "deny_categories": [],
+            "runtime_assured_files": DEP_FILES,
+            "file_paths": DEP_FILES,
+            "garnet_runtime": {
+                "commit": HEAD,
+                "pinned_to_head": True,
+                "pending": False,
+                "off_baseline_destinations": [],
+            },
+        }
+    }
+    assert "APPLIED" in render(clean)
