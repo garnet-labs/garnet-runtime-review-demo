@@ -118,12 +118,20 @@ jobs:
           PR="${{ steps.pr.outputs.number }}"
           # Strip any ANSI color escapes so the posted comment renders cleanly.
           sed -r 's/\x1b\[[0-9;]*m//g' review-output.txt > review-clean.txt 2>/dev/null || cp review-output.txt review-clean.txt
+          # Render the Garnet runtime-grounding from the verdict JSON so the
+          # deterministic result explains *why* the deny was lifted or withheld.
+          GROUNDING="$(python3 tools/pr-approval-agent/render_grounding.py "verdict-$PR.json" 2>/dev/null || true)"
           {
             echo "<!-- stamphog-verdict -->"
             echo "### Stamphog verdict — PR #$PR"
             echo '```'
             cat review-clean.txt 2>/dev/null || echo "(engine produced no output — see the run log)"
             echo '```'
+            if [ -n "$GROUNDING" ]; then
+              echo ""
+              echo "$GROUNDING"
+            fi
+            echo ""
             echo "_Reviewer executed under Garnet runtime visibility. Full log in the workflow run._"
           } > verdict-comment.md
           gh pr comment "$PR" --repo "${{ github.repository }}" --body-file verdict-comment.md
