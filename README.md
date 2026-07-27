@@ -18,23 +18,46 @@ through the clean one and stop the poisoned one — and tell you exactly why.
 
 ## The result, at a glance
 
-Both demo PRs are the **same shape**: add one dependency (`ms@2.1.3`) with a
-matching lockfile — the change stamphog hard-denies as `deps_toolchain`
+The first two demo PRs are the **same shape**: add one dependency (`ms@2.1.3`)
+with a matching lockfile — the change stamphog hard-denies as `deps_toolchain`
 ("never auto-approve"). The only variable is what Garnet recorded at install
-time.
+time. A third PR ([#6](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/6))
+raises the bar to the realistic case: egress hidden in a *transitive*
+dependency, invisible in the diff.
 
 | Demo PR | What the install actually did (Garnet) | Gate **without** Garnet | Gate **with** Garnet |
 |---|---|---|---|
-| **Clean** — [PR #__CLEAN_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__CLEAN_PR__) | hit `registry.npmjs.org` only | ❌ **DENY** → every dep PR dumped on a human | ✅ **APPROVE** — "install egress stayed within the registry baseline; no off-baseline destinations" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/__CLEAN_RUN__)) |
-| **Poisoned** — [PR #__LOUD_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__LOUD_PR__) | postinstall hook ran `curl https://httpbin.org/get` | ❌ **DENY** — but blind to *why* | 🛑 **REFUSE** — "OFF-BASELINE egress to **httpbin.org**, not explained by the `ms@2.1.3` addition — supply-chain risk" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/__LOUD_RUN__)) |
+| **Clean** — [PR #1](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/1) | hit `registry.npmjs.org` only | ❌ **DENY** → every dep PR dumped on a human | ✅ **APPROVE** — "install egress stayed within the registry baseline; no off-baseline destinations" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305816428)) |
+| **Poisoned** — [PR #2](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/2) | postinstall hook ran `curl https://httpbin.org/get` | ❌ **DENY** — but blind to *why* | 🛑 **REFUSE** — "OFF-BASELINE egress to **httpbin.org**, not explained by the `ms@2.1.3` addition — supply-chain risk" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305817810)) |
 
 Without Garnet the gate can't tell those two PRs apart. With Garnet, the clean
 bump merges itself and the poisoned one is stopped with the destination named —
 even though its diff looks like a trivial one-liner.
 
-> Both demo PRs were opened by an **AI coding agent** (see each PR body). That is
-> the real threat model: agents increasingly author dependency changes, and the
-> diff alone can't tell you what the install will do on your runners.
+### The realistic case: egress hidden in a transitive dependency
+
+The poisoned PR above puts its hook where you could theoretically spot it. The
+harder, more honest case is [**PR #6**](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/6):
+its diff adds **one** top-level dependency (`chart-helpers`) for axis-label
+formatting — 45 lines, a manifest and a lockfile, nothing suspicious. The egress
+lives **two levels down** the dependency tree (`chart-helpers → date-fmt →
+metrics-beacon`), in a bundled `postinstall` that never appears in the diff. A
+diff-only or static reviewer has nothing to flag.
+
+Garnet records the install anyway and the gate reads it — the verdict comment on
+PR #6 says it in its own words ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305820748)):
+
+> **Runtime bypass: WITHHELD** — the install reached destinations outside the npm
+> baseline, so the `deps_toolchain` deny stands and the hosts above are the
+> evidence.
+> Off-baseline egress → `api.ipify.org`, `ip-api.com`, `httpbin.org`
+
+The reviewer catches what the diff cannot show, and names all three transitive
+destinations as the evidence — head-pinned to the exact PR commit.
+
+> Every demo PR here was opened by an **AI coding agent** (see each PR body). That
+> is the real threat model: agents increasingly author dependency changes, and
+> the diff alone can't tell you what the install will do on your runners.
 
 ---
 
@@ -78,8 +101,9 @@ internals — any consumer of PR comments could do the same.
 ## The safety rails (all proven, not asserted)
 
 - **Scoped bypass.** Garnet only lifts the deny on dependency-shaped files. Auth,
-  billing, and migration files can never ride along — see the express demo PR
-  ([#__EXPRESS_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__EXPRESS_PR__)).
+  billing, and migration files can never ride along — see the scoped demo PR
+  ([#3](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/3)), where
+  a clean record lifts the deps deny but the `auth` deny still stands.
 - **Head-pinned.** Assurance is bound to the exact commit SHA. A record on an
   older commit confers nothing.
 - **Fail-safe.** Missing / stale / still-recording evidence → **WAIT**, never a

@@ -7,9 +7,10 @@ is staged or hand-edited after the fact.
 
 | # | Demo PR | Runtime reality (Garnet) | Verdict without Garnet | Verdict with Garnet | Evidence |
 |---|---|---|---|---|---|
-| 1 | Clean — [#__CLEAN_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__CLEAN_PR__) | `registry.npmjs.org` only | DENY (deps_toolchain, T2-never) | **APPROVE** | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/__CLEAN_RUN__) |
-| 2 | Poisoned — [#__LOUD_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__LOUD_PR__) | postinstall → `curl httpbin.org` | DENY (blind to why) | **REFUSE**, cites `httpbin.org` | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/__LOUD_RUN__) |
-| 3 | Scoped — [#__EXPRESS_PR__](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/__EXPRESS_PR__) | n/a (non-dep file) | DENY | **still blocked** — bypass is scoped to dep files only | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/__EXPRESS_RUN__) |
+| 1 | Clean — [#1](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/1) | `registry.npmjs.org` only | DENY (deps_toolchain, T2-never) | **APPROVE** | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305816428) |
+| 2 | Poisoned — [#2](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/2) | postinstall → `curl httpbin.org` | DENY (blind to why) | **REFUSE**, cites `httpbin.org` | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305817810) |
+| 3 | Scoped — [#3](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/3) | clean dep install + an `auth` file | DENY (deps + auth) | **still blocked** — deps deny lifted, `auth` deny stands | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305819203) |
+| 6 | Transitive — [#6](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/6) | 2-deep transitive postinstall → `api.ipify.org`, `ip-api.com`, `httpbin.org` (**not in diff**) | DENY (and a diff-only reviewer sees nothing to flag) | **WITHHELD** — deny stands, all 3 transitive hosts named | [verdict run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305820748) · [record run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305397518) |
 
 ## What each run demonstrates
 
@@ -21,7 +22,26 @@ is staged or hand-edited after the fact.
   verdict names the destination.
 - **Scoped → still blocked.** A change touching a non-dependency file does not
   ride the bypass, proving Garnet can't be used to wave through auth/billing/
-  migration edits.
+  migration edits. The verdict's grounding line shows the deps deny lifted while
+  the `auth` deny remains.
+- **Transitive → WITHHELD.** The most realistic case: the PR diff adds only a
+  top-level `chart-helpers` dependency (a clean-looking 45-line manifest +
+  lockfile). The egress lives two levels down (`chart-helpers → date-fmt →
+  metrics-beacon`) in a bundled `postinstall` that never appears in the diff, so
+  a diff-only or static reviewer passes it. Garnet records the install regardless
+  and the gate withholds the bypass, naming all three transitive destinations as
+  the evidence — head-pinned to the PR commit.
+
+## Deterministic vs LLM verdicts
+
+Every verdict linked above runs in **deterministic-gate mode** — no LLM key is
+configured on this public repo, so the result depends only on the gates plus the
+head-pinned Garnet record. That is deliberate: the runtime grounding (the
+"Runtime evidence (Garnet)" block in each verdict comment) is what flips the
+outcome, and it is fully reproducible by anyone. The full natural-language LLM
+reviewer lane activates automatically once an `ANTHROPIC_API_KEY` repo secret is
+added — the same engine, now writing the verdict in prose and citing the recorded
+hosts. The runtime signal feeds both lanes identically.
 
 ## The recording side
 
@@ -33,8 +53,9 @@ Runtime Review comment (head-pinned) is visible directly on each PR.
 
 The [`proof-check.yml`](.github/workflows/proof-check.yml) workflow re-asserts
 the full decision rule (clean lifts / off-baseline stands + names / stale +
-pending + missing WAIT / legend never parsed / bypass scoped) on every push and
-weekly. A green [Living Proof badge](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/workflows/proof-check.yml)
+pending + missing WAIT / legend never parsed / bypass scoped / transitive multi-
+host caught + all named / grounding text says WITHHELD vs APPLIED) on every push
+and weekly — 10 tests. A green [Living Proof badge](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/workflows/proof-check.yml)
 means the A/B still holds on current code.
 
 ## The integration point
