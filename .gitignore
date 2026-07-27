@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.log
+verdict-*.json
+review-output.txt

@@ -1,0 +1,138 @@
+# Runs the vendored stamphog merge-gate engine (full LLM verdict) against a PR,
+# with the reviewer's own execution recorded under the Garnet sensor — the merge
+# gate gets the same runtime accountability it demands of the code it reviews.
+#
+# Mirrors PostHog's real pr-approval-agent.yml as closely as a fork allows:
+#   - triggered by the `stamphog` label on a non-draft, non-bot-authored PR
+#     (plus ready_for_review / synchronize when the label is already present)
+#   - the engine + policy are always checked out from the default branch (main),
+#     hardcoded, so a PR targeting main can't supply a tampered gate
+#   - the PR head is fetched separately and reviewed
+# Difference vs PostHog: they post the verdict as the stamphog[bot] GitHub App;
+# a fork has no App, so we post as github-actions[bot] and also emit the job
+# summary + an artifact. workflow_dispatch is kept for manual A/B runs.
+name: Stamphog Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+        type: string
+      dry_run:
+        description: "Gates only (skip LLM)"
+        required: false
+        type: boolean
+        default: false
+  pull_request:
+    types: [labeled, ready_for_review, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: stamphog-review-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: "Stamphog verdict (Garnet-recorded)"
+    # Manual dispatch always runs. For pull_request events, mirror PostHog:
+    # only the `stamphog` label on a non-draft, human-authored PR (or a
+    # ready_for_review / synchronize while the label is already present).
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (
+        !github.event.pull_request.draft
+        && github.event.pull_request.user.type != 'Bot'
+        && !contains(github.event.pull_request.user.login, '[bot]')
+        && (
+          github.event.label.name == 'stamphog'
+          || (github.event.action == 'ready_for_review' && contains(github.event.pull_request.labels.*.name, 'stamphog'))
+          || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'stamphog'))
+        )
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # Always run the engine + policy from the default branch — hardcoded so a
+      # PR targeting main can't supply a tampered script or policy.
+      - name: Checkout main (trusted gate source)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Garnet Runtime Visibility
+        uses: garnet-org/action@v2
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Resolve PR number
+        id: pr
+        run: echo "number=${{ github.event.pull_request.number || inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch PR head
+        run: git fetch origin "pull/${{ steps.pr.outputs.number }}/head"
+
+      - name: Run stamphog engine
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PYTHONPATH: ${{ github.workspace }}/tools/owners
+          NO_COLOR: "1"
+          TERM: dumb
+        run: |
+          set -o pipefail
+          # Deterministic-gate mode when no LLM key is configured (public demo
+          # runs out-of-the-box on the Garnet token alone); full LLM verdict
+          # once ANTHROPIC_API_KEY is present. Manual dispatch can force dry-run.
+          EXTRA=""
+          if [ -z "${ANTHROPIC_API_KEY:-}" ] || [ "${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'true' || 'false' }}" = "true" ]; then
+            EXTRA="--dry-run"
+            echo "Running in deterministic-gate mode (--dry-run)."
+          fi
+          uv run tools/pr-approval-agent/review_pr.py "${{ steps.pr.outputs.number }}" \
+            --repo "${{ github.repository }}" \
+            $EXTRA \
+            --output-json "verdict-${{ steps.pr.outputs.number }}.json" | tee review-output.txt
+          {
+            echo '## Stamphog verdict for PR #${{ steps.pr.outputs.number }}'
+            echo '```'
+            cat review-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post verdict comment
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ steps.pr.outputs.number }}"
+          # Strip any ANSI color escapes so the posted comment renders cleanly.
+          sed -r 's/\x1b\[[0-9;]*m//g' review-output.txt > review-clean.txt 2>/dev/null || cp review-output.txt review-clean.txt
+          {
+            echo "<!-- stamphog-verdict -->"
+            echo "### Stamphog verdict — PR #$PR"
+            echo '```'
+            cat review-clean.txt 2>/dev/null || echo "(engine produced no output — see the run log)"
+            echo '```'
+            echo "_Reviewer executed under Garnet runtime visibility. Full log in the workflow run._"
+          } > verdict-comment.md
+          gh pr comment "$PR" --repo "${{ github.repository }}" --body-file verdict-comment.md
+
+      - name: Upload verdict bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stamphog-verdict-pr${{ steps.pr.outputs.number }}
+          path: |
+            verdict-${{ steps.pr.outputs.number }}.json
+            review-output.txt

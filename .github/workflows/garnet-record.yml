@@ -1,0 +1,153 @@
+# npm top-10 testbed — PR CI under the Garnet sensor.
+#
+# For each testbed PR (one new dependency in npm-testbed/app/package.json):
+#   1. record   — start garnet-org/action (Jibril eBPF), npm install, run the
+#                 smoke test, export the execution record. The installed
+#                 Garnet integration posts the Garnet Runtime Review comment
+#                 for this PR head — the factual runtime record.
+#   2. coverage-gap — contrast the reviewable diff with the recorded
+#                 execution surface (packages installed, processes, egress)
+#                 and upsert one sticky PR comment + Step Summary.
+#
+# Triggers: pull_request for ordinary pushes, plus workflow_dispatch with
+# pr_number because PRs opened by npm-testbed-open-pr.yml (GITHUB_TOKEN) do
+# not fire pull_request workflows.
+name: Garnet Record (install under sensor)
+
+on:
+  pull_request:
+    paths:
+      - "npm-testbed/**"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to record and comment on"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: npm-testbed-ci-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  record:
+    name: "Record: install under Garnet"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Start Jibril first — everything after this line is recorded.
+      - name: Start Garnet runtime sensor
+        uses: garnet-org/action@v2
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          jibril_version: "v2.15.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The workload: install the PR's dependency set and first-import it.
+      # continue-on-error — a failing install still gets a runtime record.
+      - name: Install dependencies (the workload)
+        continue-on-error: true
+        working-directory: npm-testbed/app
+        run: npm install
+
+      - name: Run smoke test (first import + exercise)
+        continue-on-error: true
+        working-directory: npm-testbed/app
+        run: npm run smoke
+
+      # Give the sensor time to process the workload's flows before stopping.
+      - name: Let sensor settle
+        if: always()
+        run: sleep 30
+
+      - name: Export execution record
+        if: always()
+        run: |
+          set -uo pipefail
+          sudo systemctl stop jibril.service || true
+          for i in $(seq 1 10); do
+            if sudo test -f /var/log/jibril.profile.json; then break; fi
+            sleep 1
+          done
+          mkdir -p "$RUNNER_TEMP/record"
+          if sudo test -f /var/log/jibril.profile.json; then
+            sudo cp /var/log/jibril.profile.json "$RUNNER_TEMP/record/jibril.profile.json"
+            sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/record/jibril.profile.json"
+            wc -c "$RUNNER_TEMP/record/jibril.profile.json"
+          else
+            echo "No execution record found at /var/log/jibril.profile.json" >&2
+          fi
+          cp npm-testbed/app/package-lock.json "$RUNNER_TEMP/record/package-lock.json" 2>/dev/null || true
+
+      - name: Upload execution record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-testbed-record-${{ github.run_id }}
+          path: ${{ runner.temp }}/record/
+          if-no-files-found: warn
+          retention-days: 14
+
+  coverage-gap:
+    name: Static review vs execution surface
+    runs-on: ubuntu-latest
+    needs: record
+    if: always()
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download execution record
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-testbed-record-${{ github.run_id }}
+          path: ${{ runner.temp }}/record
+
+      - name: Render and upsert the coverage-gap comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          PROFILE_PATH: ${{ runner.temp }}/record/jibril.profile.json
+          LOCKFILE_PATH: ${{ runner.temp }}/record/package-lock.json
+        run: |
+          set -euo pipefail
+          base_ref=$(gh pr view "$PR_NUMBER" --json baseRefName --jq .baseRefName)
+          head_sha=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)
+          git fetch origin "$base_ref" >/dev/null 2>&1 || true
+
+          export DIFF_NUMSTAT=$(git diff --numstat "origin/${base_ref}...${head_sha}" || true)
+          git diff "origin/${base_ref}...${head_sha}" > "$RUNNER_TEMP/diff.patch" || true
+          export DIFF_PATCH_PATH="$RUNNER_TEMP/diff.patch"
+          export HEAD_SHA="$head_sha"
+          node npm-testbed/scripts/coverage-gap.mjs > "$RUNNER_TEMP/coverage-gap.md"
+
+          cat "$RUNNER_TEMP/coverage-gap.md" >> "$GITHUB_STEP_SUMMARY"
+
+          marker="<!-- npm-testbed-coverage-gap -->"
+          existing=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq "[.[] | select(.body | contains(\"${marker}\")) | .id] | first // empty")
+          if [ -n "$existing" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" \
+              -X PATCH -F body=@"$RUNNER_TEMP/coverage-gap.md" >/dev/null
+            echo "Updated coverage-gap comment ${existing}"
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -X POST -F body=@"$RUNNER_TEMP/coverage-gap.md" >/dev/null
+            echo "Posted coverage-gap comment"
+          fi
