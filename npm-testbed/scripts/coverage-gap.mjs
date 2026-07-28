@@ -81,6 +81,21 @@ if (profile) {
   }
 }
 
+// Domain scoring. Only workload-relevant egress counts toward the coverage
+// gap: GitHub-hosted runner/action infrastructure and the package registry
+// baseline are expected on every run and must not pad the numbers (mirrors
+// the RUNNER_STEP_BASELINE / WORKLOAD_BASELINE split in
+// tools/pr-approval-agent/garnet_runtime.py).
+const INFRA_EXACT = new Set(["github.com", "api.github.com", "codeload.github.com", "localhost"])
+const INFRA_SUFFIXES = [".githubusercontent.com", ".githubapp", ".githubapp.com", ".actions.githubusercontent.com"]
+const INFRA_PREFIXES = ["hosted-compute-", "glb-"]
+const REGISTRY_BASELINE = new Set(["registry.npmjs.org"])
+const isInfra = (d) =>
+  INFRA_EXACT.has(d) || INFRA_SUFFIXES.some((s) => d.endsWith(s)) || INFRA_PREFIXES.some((p) => d.startsWith(p))
+const infraDomains = domains.filter(isInfra)
+const registryDomains = domains.filter((d) => !isInfra(d) && REGISTRY_BASELINE.has(d))
+const workloadDomains = domains.filter((d) => !isInfra(d) && !REGISTRY_BASELINE.has(d))
+
 const domainsInDiff = domains.filter((d) => patch.includes(d))
 const n = (v) => (v === null || v === undefined ? "—" : String(v))
 
@@ -95,15 +110,24 @@ lines.push("| --- | --- | --- |")
 lines.push(`| Lines | ${diffLines} changed (${added}+ / ${deleted}−) | — |`)
 lines.push(`| Files / packages | ${files.length} file(s) touched | ${n(lockPackages)} package(s) installed (${n(directDeps)} direct) |`)
 lines.push(`| Processes | 0 visible in diff | ${profile ? processes.size : "—"} recorded process(es), ${profile ? lineageNodes.size : "—"} distinct lineage node(s) |`)
-lines.push(`| Outbound destinations | ${domainsInDiff.length} named in diff | ${profile ? domains.length : "—"} domain(s), ${n(connections)} connection(s) |`)
+lines.push(`| Outbound destinations | ${domainsInDiff.length} named in diff | ${profile ? `${workloadDomains.length} workload domain(s) beyond CI infra/registry (${domains.length} total)` : "—"}, ${n(connections)} connection(s) |`)
 if (detections.size > 0) {
   lines.push(`| Detections | — | ${[...detections].sort().join(", ")} |`)
 }
 lines.push("")
 if (domains.length > 0) {
-  const unexplained = domains.filter((d) => !domainsInDiff.includes(d))
-  lines.push(`Recorded outbound domains: ${domains.map((d) => `\`${d}\``).join(", ")}.`)
-  lines.push(`${unexplained.length} of ${domains.length} recorded domain(s) appear nowhere in the diff — the diff alone cannot explain them.`)
+  const unexplainedWorkload = workloadDomains.filter((d) => !domainsInDiff.includes(d))
+  if (workloadDomains.length > 0) {
+    lines.push(`Workload egress beyond CI infrastructure and the npm registry: ${workloadDomains.map((d) => `\`${d}\``).join(", ")}.`)
+    lines.push(`${unexplainedWorkload.length} of ${workloadDomains.length} workload domain(s) appear nowhere in the diff — the diff alone cannot explain them.`)
+  } else {
+    lines.push("All recorded workload egress stayed within CI infrastructure and the npm registry baseline.")
+  }
+  const rest = [...registryDomains, ...infraDomains]
+  if (rest.length > 0) {
+    lines.push("")
+    lines.push(`<sub>Baseline (not scored): registry ${registryDomains.map((d) => `\`${d}\``).join(", ") || "—"} · runner/CI infra ${infraDomains.map((d) => `\`${d}\``).join(", ")}</sub>`)
+  }
 } else if (profile) {
   lines.push("No outbound domains were recorded for this run.")
 } else {
