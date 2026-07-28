@@ -27,8 +27,8 @@ dependency, invisible in the diff.
 
 | Demo PR | What the install actually did (Garnet) | Gate **without** Garnet | Gate **with** Garnet |
 |---|---|---|---|
-| **Clean** — [PR #1](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/1) | hit `registry.npmjs.org` only | ❌ **DENY** → every dep PR dumped on a human | ✅ **APPROVE** — "install egress stayed within the registry baseline; no off-baseline destinations" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305816428)) |
-| **Poisoned** — [PR #2](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/2) | postinstall hook ran `curl https://httpbin.org/get` | ❌ **DENY** — but blind to *why* | 🛑 **REFUSE** — "OFF-BASELINE egress to **httpbin.org**, not explained by the `ms@2.1.3` addition — supply-chain risk" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305817810)) |
+| **Clean** — [PR #1](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/1) | hit `registry.npmjs.org` only | ❌ **DENY** → every dep PR dumped on a human | ✅ **APPROVE** — "install egress stayed within the registry baseline; no off-baseline destinations" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30376231711)) |
+| **Poisoned** — [PR #2](https://github.com/garnet-labs/garnet-runtime-review-demo/pull/2) | postinstall hook ran `curl https://httpbin.org/get` | ❌ **DENY** — but blind to *why* | 🛑 **REFUSE** — "OFF-BASELINE egress to **httpbin.org**, not explained by the `ms@2.1.3` addition — supply-chain risk" ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30376233945)) |
 
 Without Garnet the gate can't tell those two PRs apart. With Garnet, the clean
 bump merges itself and the poisoned one is stopped with the destination named —
@@ -44,16 +44,23 @@ lives **two levels down** the dependency tree (`chart-helpers → date-fmt →
 metrics-beacon`), in a bundled `postinstall` that never appears in the diff. A
 diff-only or static reviewer has nothing to flag.
 
-Garnet records the install anyway and the gate reads it — the verdict comment on
-PR #6 says it in its own words ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30305820748)):
+Garnet records the install anyway and the signal flows through stamphog's own
+gates. The Gates block on PR #6 reads ([run](https://github.com/garnet-labs/garnet-runtime-review-demo/actions/runs/30376239347)):
 
-> **Runtime bypass: WITHHELD** — the install reached destinations outside the npm
-> baseline, so the `deps_toolchain` deny stands and the hosts above are the
-> evidence.
-> Off-baseline egress → `api.ipify.org`, `ip-api.com`, `httpbin.org`
+```text
+  ✗ deny-list: matches: deps_toolchain [Garnet: off-baseline egress → api.ipify.org, httpbin.org, ip-api.com]
+  runtime (Garnet): head-pinned d15540e; off-baseline egress → api.ipify.org, httpbin.org, ip-api.com; deps bypass WITHHELD
+```
 
-The reviewer catches what the diff cannot show, and names all three transitive
-destinations as the evidence — head-pinned to the exact PR commit.
+…and the LLM reviewer, handed the same signal, refuses in its own words:
+
+> Gates denied: this dependency add pulls in a transitive package whose install
+> script beacons out to off-baseline hosts (api.ipify.org, httpbin.org,
+> ip-api.com) **per kernel-recorded runtime evidence** — a supply-chain risk
+> invisible in the diff itself.
+
+The runtime evidence is a first-class gate input — not a separate footer — and it
+names all three transitive destinations, head-pinned to the exact PR commit.
 
 > Every demo PR here was opened by an **AI coding agent** (see each PR body). That
 > is the real threat model: agents increasingly author dependency changes, and
