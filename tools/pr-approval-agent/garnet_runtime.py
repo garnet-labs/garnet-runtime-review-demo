@@ -149,6 +149,35 @@ def runtime_assured_files(record: GarnetRecord | None, head_sha: str, pr_file_pa
     return {p for p in pr_file_paths if _DEP_FILE_RE.search(p)}
 
 
+def runtime_summary(
+    record: GarnetRecord | None,
+    head_sha: str,
+    assured_files: set[str] | list[str],
+    touches_deps: bool,
+) -> str:
+    """One-line runtime signal for the Gates block, in the engine's own shape.
+
+    This is how the Garnet record enters the decision surface: a single context
+    line printed alongside `ownership:`, derived from the same record that gates
+    the deps_toolchain bypass. It states plainly whether the record lifted or
+    withheld the bypass and why — no separate footer, no second comment.
+    """
+    if record is None:
+        return "no head-pinned record — deps deny not lifted" if touches_deps else "no record (no dependency changes)"
+    sha = (record.commit or "")[:7] or "unknown"
+    if record.pending:
+        return f"recording in progress ({sha}) — no assurance yet"
+    if not record.pinned_to(head_sha):
+        return f"stale record ({sha}, not at head) — no assurance"
+    off = sorted(record.off_baseline())
+    if off:
+        return f"head-pinned {sha}; off-baseline egress → {', '.join(off)}; deps bypass WITHHELD"
+    n = len(list(assured_files))
+    if n:
+        return f"head-pinned {sha}; egress within npm baseline; deps bypass APPLIED ({n} dep file{'s' if n != 1 else ''})"
+    return f"head-pinned {sha}; egress within npm baseline"
+
+
 def garnet_record_pending(record: GarnetRecord | None, head_sha: str, pr_file_paths: list[str]) -> bool:
     """True when the PR touches dependency files and no final head-pinned record exists.
 

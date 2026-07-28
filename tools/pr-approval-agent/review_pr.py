@@ -63,7 +63,7 @@ from github import (
     provenance_evidence,
     write_pr_diff,
 )
-from garnet_runtime import fetch_garnet_record, garnet_record_pending, runtime_assured_files
+from garnet_runtime import fetch_garnet_record, garnet_record_pending, runtime_assured_files, runtime_summary
 from manifest_risk import manifest_script_changes
 from migration_risk import migration_check_pending, safe_migration_files
 from policy import EffectivePolicy, ScopeBudget, _sanitize_untrusted, repo_root, resolve
@@ -620,6 +620,24 @@ class Pipeline:
         ownership = self._summarize_ownership()
         print(_dim(f"  ownership: {ownership}"))
 
+        # Garnet runtime signal, in the same context-line shape as ownership.
+        # This is the record that gated the deps_toolchain bypass above; showing
+        # it here is how the runtime evidence enters the decision surface.
+        gr = self.classification.get("garnet_runtime") or {}
+        touches_deps = bool(
+            self.classification.get("has_dep_changes")
+            or self.classification.get("dep_manifests_without_lockfile")
+        )
+        if gr or touches_deps:
+            summary = runtime_summary(
+                self.garnet_record,
+                self.pr.head_sha,
+                self.classification.get("runtime_assured_files", []),
+                touches_deps,
+            )
+            self.classification["runtime_summary"] = summary
+            print(_dim(f"  runtime (Garnet): {summary}"))
+
     def _any_gate_denied(self) -> bool:
         return any(not r.passed for r in self.gate_results)
 
@@ -648,10 +666,16 @@ class Pipeline:
     def _check_deny_list(self) -> tuple[bool, str]:
         deny = self.classification["deny_categories"]
         risky = self.classification.get("manifest_script_changes", [])
+        # When the deps_toolchain deny survived because the runtime record showed
+        # off-baseline egress, name that on the gate line itself — the deny and
+        # its runtime cause read as one fact, not two.
+        gr = self.classification.get("garnet_runtime") or {}
+        off = gr.get("off_baseline_destinations") or []
+        garnet_note = f" [Garnet: off-baseline egress → {', '.join(off)}]" if ("deps_toolchain" in deny and off) else ""
         if risky:
-            return False, f"matches: {', '.join(deny)} (scripts/hooks changed in {', '.join(risky)})"
+            return False, f"matches: {', '.join(deny)} (scripts/hooks changed in {', '.join(risky)}){garnet_note}"
         if deny:
-            return False, f"matches: {', '.join(deny)}"
+            return False, f"matches: {', '.join(deny)}{garnet_note}"
         return True, "no deny categories matched"
 
     def _summarize_ownership(self) -> str:

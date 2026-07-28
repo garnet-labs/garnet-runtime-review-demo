@@ -15,7 +15,7 @@ The claims under test are exactly the ones an evaluator cares about:
   4. the comment's legend example      -> NEVER parsed as recorded egress
   5. scoping: only dependency-shaped files can ride the bypass, never auth
   6. transitive egress not in the diff -> caught from the record; all hosts named
-  7. the posted grounding text         -> says WITHHELD vs APPLIED correctly
+  7. the native runtime summary line   -> says WITHHELD vs APPLIED correctly
 """
 
 from __future__ import annotations
@@ -127,36 +127,20 @@ def test_transitive_egress_not_in_diff_is_caught_and_all_hosts_named():
     assert runtime_assured_files(rec, HEAD, DEP_FILES) == set(), "deny stands"
 
 
-def test_render_grounding_states_withheld_vs_applied():
-    from render_grounding import render
+def test_runtime_summary_line_states_withheld_vs_applied():
+    # The native Gates-block context line the engine prints alongside ownership.
+    from garnet_runtime import runtime_summary
 
-    off = {
-        "classification": {
-            "deny_categories": ["deps_toolchain"],
-            "runtime_assured_files": [],
-            "file_paths": DEP_FILES,
-            "garnet_runtime": {
-                "commit": HEAD,
-                "pinned_to_head": True,
-                "pending": False,
-                "off_baseline_destinations": ["api.ipify.org", "httpbin.org"],
-            },
-        }
-    }
-    md = render(off)
-    assert "WITHHELD" in md and "api.ipify.org" in md and "httpbin.org" in md
+    off = _parse_comment(_comment(HEAD, ["registry.npmjs.org", "api.ipify.org", "httpbin.org"]))
+    line = runtime_summary(off, HEAD, assured_files=set(), touches_deps=True)
+    assert "head-pinned" in line and "WITHHELD" in line
+    assert "api.ipify.org" in line and "httpbin.org" in line
 
-    clean = {
-        "classification": {
-            "deny_categories": [],
-            "runtime_assured_files": DEP_FILES,
-            "file_paths": DEP_FILES,
-            "garnet_runtime": {
-                "commit": HEAD,
-                "pinned_to_head": True,
-                "pending": False,
-                "off_baseline_destinations": [],
-            },
-        }
-    }
-    assert "APPLIED" in render(clean)
+    clean = _parse_comment(_comment(HEAD, ["registry.npmjs.org"]))
+    line = runtime_summary(clean, HEAD, assured_files=DEP_FILES, touches_deps=True)
+    assert "APPLIED" in line and "within npm baseline" in line
+
+    # Fail-safe phrasings never read as an approval.
+    stale = _parse_comment(_comment("deadbeef" * 5, ["registry.npmjs.org"]))
+    assert "no assurance" in runtime_summary(stale, HEAD, set(), touches_deps=True)
+    assert "no head-pinned record" in runtime_summary(None, HEAD, set(), touches_deps=True)
