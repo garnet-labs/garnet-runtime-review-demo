@@ -102,6 +102,29 @@ def test_legend_example_is_never_parsed_as_egress():
     assert "example.com" not in rec.off_baseline()
 
 
+def test_unparseable_record_confers_no_assurance():
+    # Head-pinned comment whose trees yield zero destinations (renderer format
+    # drift, truncated body): must WAIT, never silently lift the deny.
+    body = f"<!-- garnet-runtime-review -->\n<!-- garnet:commit {HEAD} -->\n{_LEGEND}"
+    rec = _parse_comment(body)
+    assert rec.pinned_to(HEAD) and not rec.parsed
+    assert runtime_assured_files(rec, HEAD, DEP_FILES) == set()
+    assert garnet_record_pending(rec, HEAD, DEP_FILES), "unparseable -> WAIT"
+
+
+def test_v66_legend_and_defanged_destinations():
+    # Contract v6.6 renders a "How to read this" legend and defangs names
+    # (registry.npmjs[.]org). The legend must not parse; defanged names must
+    # normalize so the baseline still matches.
+    body = _comment(HEAD, ["registry.npmjs[.]org"]).replace(
+        "Reading this review", "How to read this"
+    )
+    rec = _parse_comment(body)
+    assert "registry.npmjs.org" in rec.workload_destinations
+    assert rec.off_baseline() == set()
+    assert set(runtime_assured_files(rec, HEAD, DEP_FILES)) == set(DEP_FILES)
+
+
 def test_scaffold_egress_is_not_counted_against_the_workload():
     rec = _parse_comment(_comment(HEAD, ["registry.npmjs.org"]))
     # api.github.com was recorded under runner scaffolding -> excluded
@@ -131,7 +154,9 @@ def test_runtime_summary_line_states_withheld_vs_applied():
     # The native Gates-block context line the engine prints alongside ownership.
     from garnet_runtime import runtime_summary
 
-    off = _parse_comment(_comment(HEAD, ["registry.npmjs.org", "api.ipify.org", "httpbin.org"]))
+    off = _parse_comment(
+        _comment(HEAD, ["registry.npmjs.org", "api.ipify.org", "httpbin.org"])
+    )
     line = runtime_summary(off, HEAD, assured_files=set(), touches_deps=True)
     assert "head-pinned" in line and "WITHHELD" in line
     assert "api.ipify.org" in line and "httpbin.org" in line
@@ -143,4 +168,6 @@ def test_runtime_summary_line_states_withheld_vs_applied():
     # Fail-safe phrasings never read as an approval.
     stale = _parse_comment(_comment("deadbeef" * 5, ["registry.npmjs.org"]))
     assert "no assurance" in runtime_summary(stale, HEAD, set(), touches_deps=True)
-    assert "no head-pinned record" in runtime_summary(None, HEAD, set(), touches_deps=True)
+    assert "no head-pinned record" in runtime_summary(
+        None, HEAD, set(), touches_deps=True
+    )

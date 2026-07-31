@@ -84,6 +84,7 @@ RUNNER_STEP_BASELINE_SUFFIXES: tuple[str, ...] = (
 def _in_runner_baseline(dest: str) -> bool:
     return dest in RUNNER_STEP_BASELINE or dest.endswith(RUNNER_STEP_BASELINE_SUFFIXES)
 
+
 # Dependency-shaped files the bypass may cover (mirrors the deps_toolchain
 # lockfile/manifest surface). Scoped: only files in this shape AND in the PR
 # diff are ever ignored — auth/billing/migration files never ride along.
@@ -108,9 +109,23 @@ class GarnetRecord:
     def pinned_to(self, head_sha: str) -> bool:
         return bool(self.commit) and self.commit == head_sha
 
+    @property
+    def parsed(self) -> bool:
+        """True when at least one recorded destination was extracted.
+
+        A record from which nothing could be parsed (renderer format drift,
+        truncated body) must confer no assurance — zero parsed destinations
+        is indistinguishable from a failed parse, so it fails closed.
+        """
+        return bool(self.workload_destinations or self.scaffold_destinations)
+
     def off_baseline(self, ecosystem: str = "npm") -> set[str]:
         baseline = WORKLOAD_BASELINE.get(ecosystem, frozenset())
-        return {d for d in self.workload_destinations if d not in baseline and not _in_runner_baseline(d)}
+        return {
+            d
+            for d in self.workload_destinations
+            if d not in baseline and not _in_runner_baseline(d)
+        }
 
 
 def fetch_garnet_record(repo: str, pr_number: int) -> GarnetRecord | None:
@@ -128,21 +143,29 @@ def fetch_garnet_record(repo: str, pr_number: int) -> GarnetRecord | None:
     bodies = [
         c.get("body", "")
         for c in comments
-        if (c.get("user") or {}).get("login") == GARNET_BOT and COMMENT_MARKER in (c.get("body") or "")
+        if (c.get("user") or {}).get("login") == GARNET_BOT
+        and COMMENT_MARKER in (c.get("body") or "")
     ]
     if not bodies:
         return None
     return _parse_comment(bodies[-1])
 
 
-def runtime_assured_files(record: GarnetRecord | None, head_sha: str, pr_file_paths: list[str]) -> set[str]:
+def runtime_assured_files(
+    record: GarnetRecord | None, head_sha: str, pr_file_paths: list[str]
+) -> set[str]:
     """Return dependency files that may bypass the deps_toolchain deny-list.
 
     Empty set when the record is missing, pending, stale (not pinned to the
     current head), or shows any off-baseline workload egress. The caller
     treats that as "deny-list applies normally."
     """
-    if record is None or record.pending or not record.pinned_to(head_sha):
+    if (
+        record is None
+        or record.pending
+        or not record.pinned_to(head_sha)
+        or not record.parsed
+    ):
         return set()
     if record.off_baseline():
         return set()
@@ -163,12 +186,18 @@ def runtime_summary(
     withheld the bypass and why — no separate footer, no second comment.
     """
     if record is None:
-        return "no head-pinned record — deps deny not lifted" if touches_deps else "no record (no dependency changes)"
+        return (
+            "no head-pinned record — deps deny not lifted"
+            if touches_deps
+            else "no record (no dependency changes)"
+        )
     sha = (record.commit or "")[:7] or "unknown"
     if record.pending:
         return f"recording in progress ({sha}) — no assurance yet"
     if not record.pinned_to(head_sha):
         return f"stale record ({sha}, not at head) — no assurance"
+    if not record.parsed:
+        return f"head-pinned {sha} but no destinations parsed — no assurance"
     off = sorted(record.off_baseline())
     if off:
         return f"head-pinned {sha}; off-baseline egress → {', '.join(off)}; deps bypass WITHHELD"
@@ -178,7 +207,9 @@ def runtime_summary(
     return f"head-pinned {sha}; egress within npm baseline"
 
 
-def garnet_record_pending(record: GarnetRecord | None, head_sha: str, pr_file_paths: list[str]) -> bool:
+def garnet_record_pending(
+    record: GarnetRecord | None, head_sha: str, pr_file_paths: list[str]
+) -> bool:
     """True when the PR touches dependency files and no final head-pinned record exists.
 
     Mirrors `migration_check_pending`: a missing/stale/pending record on a
@@ -188,7 +219,12 @@ def garnet_record_pending(record: GarnetRecord | None, head_sha: str, pr_file_pa
     """
     if not any(_DEP_FILE_RE.search(p) for p in pr_file_paths):
         return False
-    return record is None or record.pending or not record.pinned_to(head_sha)
+    return (
+        record is None
+        or record.pending
+        or not record.pinned_to(head_sha)
+        or not record.parsed
+    )
 
 
 def _parse_comment(body: str) -> GarnetRecord:
@@ -211,15 +247,20 @@ def _parse_comment(body: str) -> GarnetRecord:
 def _job_pre_blocks(body: str) -> list[str]:
     """Extract the per-job lineage <pre> blocks, skipping the legend.
 
-    The comment opens with a "Reading this review" legend whose example tree
-    must not be parsed as recorded egress; real job folds link to
-    /actions/runs/ in their <summary>.
+    The comment opens with a legend (💡 "Reading this review" / "How to
+    read this") whose example tree must not be parsed as recorded egress;
+    real job folds link to /actions/runs/ in their <summary>.
     """
     blocks: list[str] = []
     for section in body.split("<details")[1:]:
-        if "Reading this review" in section.split("</summary>")[0]:
+        summary = section.split("</summary>")[0]
+        if (
+            "Reading this review" in summary
+            or "How to read this" in summary
+            or "💡" in summary
+        ):
             continue
-        for pre in re.findall(r"<pre>(.*?)</pre>", section, flags=re.S):
+        for pre in re.findall(r"<pre>(.*?)</pre>", section, flags=re.DOTALL):
             blocks.append(pre)
     return blocks
 
@@ -260,6 +301,7 @@ def _parse_lineage_tree(pre: str) -> tuple[set[str], set[str]]:
 
 def _clean_destination(rest: str) -> str:
     dest = rest.split("→", 1)[1]
-    dest = re.sub(r"<[^>]+>", "", dest)          # strip html tags
-    dest = re.sub(r"\([^)]*\)", "", dest)        # strip annotations like (dns resolver)
+    dest = re.sub(r"<[^>]+>", "", dest)  # strip html tags
+    dest = re.sub(r"\([^)]*\)", "", dest)  # strip annotations like (dns resolver)
+    dest = re.sub(r"\[([.:])\]", r"\1", dest)  # normalize defanged names: example[.]com
     return dest.strip()
