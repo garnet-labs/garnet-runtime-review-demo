@@ -151,3 +151,26 @@ jobs:
               -X POST -F body=@"$RUNNER_TEMP/coverage-gap.md" >/dev/null
             echo "Posted coverage-gap comment"
           fi
+
+  # Mirror the head-bound Garnet Runtime Review comment into the PR
+  # description. Some AI reviewers never receive PR discussion comments in
+  # their review context (verified with Greptile); every reviewer reads the
+  # description. Verbatim, head-bound — see tools/garnet-evidence-mirror/.
+  # The installed App posts the comment asynchronously, so the mirror polls.
+  evidence-mirror:
+    name: Mirror evidence into the PR description
+    runs-on: ubuntu-latest
+    needs: record
+    if: always()
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Upsert the garnet:evidence description section
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node tools/garnet-evidence-mirror/mirror.mjs
