@@ -1,0 +1,97 @@
+# ARM 2 of 2 — RUNTIME IMPORT under Garnet (the browser-login path).
+#
+# Installs @kolbo/mcp, then drives the published stdio MCP server over JSON-RPC
+# with no credential available, which forces client.js:215
+# (`require('./auth')`) — the module that 1.57.1 trojanizes.
+#
+# EXPECTED RESULT
+#   commit 1 (pre-payload version): registry + runner substrate only.
+#   commit 2 (1.57.1): brand-new destinations appear — Ethereum RPC endpoints
+#   (eth.blockscout.com, 1rpc.io, eth.drpc.org, ethereum-rpc.publicnode.com,
+#   eth-mainnet.public.blastapi.io) followed by a connection attempt to a C2 IP
+#   decoded from on-chain data, plus a detached `node -e` child process.
+#
+# None of that is inferable from the diff, which is a one-line version bump.
+#
+# !! THIS JOB EXECUTES ATTACKER-AUTHORED CONTROL FLOW !!
+# Containment (studies/kolbo-mcp/contain.sh) resolves the dead drop first and
+# DROPs egress to the C2, so the loader's on-chain lookup is recorded but
+# stage 2 is never retrieved or evaluated. Even so:
+#   * permissions are dropped to contents:read only,
+#   * no repository secret other than GARNET_API_TOKEN is exposed to this job,
+#   * the runner is ephemeral and must be treated as burned,
+#   * rotate GARNET_API_TOKEN after running this.
+#
+# LOAD-BEARING: workflow name, job key and the Garnet action pin stay
+# byte-identical across both commits — only manifest.json changes.
+name: kolbo-mcp — runtime import (garnet)
+
+on:
+  pull_request:
+    paths:
+      - "studies/kolbo-mcp/**"
+      - ".github/workflows/kolbo-mcp-runtime-import.yml"
+  workflow_dispatch: {}
+
+# Minimum viable scope. The Garnet App posts the Runtime Review comment itself,
+# so this job does not need pull-requests:write.
+permissions:
+  contents: read
+
+concurrency:
+  group: kolbo-mcp-runtime-import-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  runtime:
+    name: "import @kolbo/mcp at runtime (browser-login path)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sensor first — everything after this line is recorded.
+      - name: Garnet Runtime Visibility
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          api_url: https://api.garnet.ai
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install from the npm registry
+        continue-on-error: true
+        run: |
+          set +e
+          PKG=$(jq -r '.package' studies/kolbo-mcp/manifest.json)
+          VER=$(jq -r '.version' studies/kolbo-mcp/manifest.json)
+          echo "installing ${PKG}@${VER}"
+          npm install "${PKG}@${VER}" --no-save --no-package-lock
+
+      # Runs BEFORE any package code is executed.
+      - name: Contain (block stage-2 retrieval)
+        run: |
+          chmod +x studies/kolbo-mcp/contain.sh
+          studies/kolbo-mcp/contain.sh
+
+      - name: Runtime import via the MCP stdio server
+        continue-on-error: true
+        env:
+          # Belt and braces — the test also strips these from the child env.
+          KOLBO_API_KEY: ""
+        run: node studies/kolbo-mcp/runtime-import-test.mjs
+
+      # The payload spawns a detached, unref'd `node -e` child with
+      # stdio:"ignore" that outlives its parent. Dwell so the sensor observes it.
+      - name: Let sensor settle
+        if: always()
+        run: sleep 60
+
+      - name: What is still running
+        if: always()
+        run: |
+          echo "node processes:"; ps -ef | grep -c '[n]ode' || true
+          echo "detached node -e children (payload persistence indicator):"
+          ps -ef | grep '[n]ode -e' | head || echo "  none observed"

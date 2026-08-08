@@ -1,0 +1,87 @@
+# ARM 1 of 2 — BUILD/INSTALL under Garnet.
+#
+# This arm installs @kolbo/mcp and does nothing else. It is the control for the
+# instrumentation itself, and it is expected to look boring across both commits.
+#
+# That boredom is the finding. @kolbo/mcp declares no preinstall, install,
+# postinstall or prepare script in either version, so `npm install` executes
+# none of the package's own code. An install-time profile of 1.57.1 is
+# therefore inert — identical to 1.57.0 — even though 1.57.1 ships a backdoor.
+#
+# Paired with kolbo-mcp-runtime-import.yml, which walks the lazy auth path, this
+# arm demonstrates that install-time runtime visibility is necessary but not
+# sufficient for an MCP server: the payload sits behind first-invocation, not
+# behind install.
+#
+# LOAD-BEARING: workflow name, job key and the Garnet action pin must stay
+# byte-identical across both commits — only manifest.json changes. If job
+# identity or sensor version drifts, Garnet sees unrelated agents, or a delta
+# that is sensor noise rather than package behaviour, and the study is void.
+name: kolbo-mcp — build/install (garnet)
+
+on:
+  pull_request:
+    paths:
+      - "studies/kolbo-mcp/**"
+      - ".github/workflows/kolbo-mcp-build-install.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # cancel-in-progress is deliberately false. This study depends on BOTH commits
+  # producing a profile; pushing commit 2 must never cancel commit 1's run, or
+  # there is nothing to diff against.
+  group: kolbo-mcp-build-install-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: "install @kolbo/mcp (no execution)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the full commit SHA of v2.2.0 (2026-07-04), the latest
+      # release; garnet.ai/pins publishes the canonical SHA. jibril_version is
+      # omitted on purpose so the sensor auto-resolves from the action tag.
+      - name: Garnet Runtime Visibility
+        uses: garnet-org/action@3d47f4a9004f7356c980a0e8d420ef5984750e3c # v2.2.0
+        with:
+          api_token: ${{ secrets.GARNET_API_TOKEN }}
+          api_url: https://api.garnet.ai
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Show that no install hooks exist
+        run: |
+          set +e
+          PKG=$(jq -r '.package' studies/kolbo-mcp/manifest.json)
+          VER=$(jq -r '.version' studies/kolbo-mcp/manifest.json)
+          echo "target: ${PKG}@${VER}"
+          echo "declared lifecycle scripts:"
+          curl -s "https://registry.npmjs.org/$(printf '%s' "$PKG" | sed 's|/|%2F|')" \
+            | jq -r --arg v "$VER" '.versions[$v].scripts
+                | with_entries(select(.key | IN("preinstall","install","postinstall","prepare")))
+                | if length == 0 then "  (none — install executes no package code)" else . end'
+
+      - name: Install from the npm registry
+        continue-on-error: true
+        run: |
+          set +e
+          PKG=$(jq -r '.package' studies/kolbo-mcp/manifest.json)
+          VER=$(jq -r '.version' studies/kolbo-mcp/manifest.json)
+          echo "installing ${PKG}@${VER}"
+          npm install "${PKG}@${VER}" --no-save --no-package-lock
+          echo "installed tree:"
+          npm ls --all --depth=1 2>/dev/null | head -20
+
+      # No import, no require, no server start. Install only, by design.
+      - name: Let sensor settle
+        if: always()
+        run: sleep 45
