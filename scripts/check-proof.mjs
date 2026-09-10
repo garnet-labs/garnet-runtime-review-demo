@@ -168,6 +168,7 @@ if (runId && headSha) {
 
 // The comment excerpt quoted in the README has to bind to the same head.
 const marker = readme.match(/<!--\s*garnet:summary\s*(\{.*?\})\s*-->/s)?.[1];
+check(marker !== undefined, "README quotes the comment's garnet:summary marker");
 if (marker) {
   const summary = JSON.parse(marker);
   check(
@@ -178,6 +179,10 @@ if (marker) {
 const commitMarker = readme.match(
   /<!--\s*garnet:commit\s+([0-9a-f]{40})\s*-->/,
 )?.[1];
+check(
+  commitMarker !== undefined,
+  "README quotes the comment's garnet:commit marker",
+);
 if (commitMarker) {
   check(
     commitMarker === headSha,
