@@ -43,7 +43,9 @@ $ curl -s "https://app.garnet.ai/api/public/runs/32909555254?profile=01a03b31-61
 The `commit_sha` in the JSON is `303616fa63129940ee79276fff5c355ad263714e`, the
 `refs/pull/29/merge` commit the runner checked out. The head SHA the comment
 binds to is `23bbd88`. Both are true; they are different commits and the profile
-names each one.
+names each one. GitHub rebuilds a pull request's merge ref every time the base
+branch moves, so `303616fa` is the merge commit as that run saw it, and its
+second parent is still `23bbd88`.
 
 ## What this evidence shows, and what it does not decide
 

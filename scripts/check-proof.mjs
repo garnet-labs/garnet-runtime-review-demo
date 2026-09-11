@@ -145,24 +145,30 @@ if (runId && headSha) {
     `Run ${runId} is the run the JSON endpoint names`,
   );
 
+  // The profile's commit_sha is either the head itself or the pull request's
+  // merge ref, which the runner checks out. GitHub recomputes that merge ref
+  // whenever the base branch moves, so `merge_commit_sha` today is not the one
+  // the recorded run used. What stays true is that the recorded commit is a
+  // merge whose second parent is the head SHA.
   const commitSha = jsonProfile?.commit_sha;
   if (commitSha === headSha) {
     check(true, `JSON commit_sha is the head SHA (${commitSha})`);
-  } else if (commitSha && commitSha === mergeCommitSha) {
+  } else if (commitSha) {
+    const { body: commit } = await api(`commits/${commitSha}`);
+    const parents = (commit.parents ?? []).map((p) => p.sha);
+    const current = commitSha === mergeCommitSha ? "current" : "superseded";
     check(
-      true,
-      `JSON commit_sha is PR #${prNumber}'s merge commit, the ref the runner checked out (${commitSha})`,
+      parents.includes(headSha),
+      `JSON commit_sha ${commitSha} is a merge of the head SHA ${headSha}: PR #${prNumber}'s merge ref as the run checked it out (${current}; merge_commit_sha is now ${mergeCommitSha}). Parents: ${parents.join(", ") || "none"}`,
     );
   } else {
-    check(
-      false,
-      `JSON commit_sha ${commitSha} is neither the head SHA ${headSha} nor the merge commit ${mergeCommitSha}`,
-    );
+    check(false, "JSON profile carries no commit_sha");
   }
 }
 
 // The comment excerpt quoted in the README has to bind to the same head.
 const marker = readme.match(/<!--\s*garnet:summary\s*(\{.*?\})\s*-->/s)?.[1];
+check(marker !== undefined, "README quotes the comment's garnet:summary marker");
 if (marker) {
   const summary = JSON.parse(marker);
   check(
@@ -173,6 +179,10 @@ if (marker) {
 const commitMarker = readme.match(
   /<!--\s*garnet:commit\s+([0-9a-f]{40})\s*-->/,
 )?.[1];
+check(
+  commitMarker !== undefined,
+  "README quotes the comment's garnet:commit marker",
+);
 if (commitMarker) {
   check(
     commitMarker === headSha,
